@@ -42,6 +42,11 @@ FULL_SDK_NAME="" # Will be auto-generated as iPhoneOS{version}
 # Tool paths
 TBD_TOOL_PATH=""
 SDK_OUTPUT_PATH=""
+DSC_EXTRACTOR_CLIENT_PATH=""  # path to compiled dsc_extractor_client binary
+
+# Resolved at runtime (may change when auto-detecting DSC arch)
+RESOLVED_DSC_BASENAME=""      # the actual dyld_shared_cache_* name found on disk
+PLATFORM_PATH=""              # xcrun --show-sdk-platform-path
 
 # Work dir (set per-run so --all can use separate dirs per version)
 WORK_DIR=""
@@ -145,6 +150,11 @@ reset_version_state() {
     SDK_OUTPUT_PATH=""
     TBD_TOOL_PATH=""
     WORK_DIR=""
+    PLATFORM_PATH=""
+    RESOLVED_DSC_BASENAME=""
+    DYLD_CACHE_PATH=""
+    # DSC_EXTRACTOR_CLIENT_PATH is intentionally NOT reset — the binary is
+    # shared across all versions and only needs to be compiled once.
 
     # Unmount any leftover volumes from the previous iteration
     for vol in "${MOUNTED_VOLS[@]+"${MOUNTED_VOLS[@]}"}"; do
@@ -790,27 +800,36 @@ find_dyld_shared_cache() {
 
     log_info "IPSW file: ${ipsw_file}"
 
-    # Method 1: ipsw extract --dyld
+    # Ordered list of DSC basenames to try – arm64e (iOS 14+), arm64 (iOS 11–13),
+    # armv7s / armv7 (iOS 9–10).  We try all so older devices are handled.
+    local dsc_candidates=("dyld_shared_cache_arm64e" "dyld_shared_cache_arm64" "dyld_shared_cache_armv7s" "dyld_shared_cache_armv7")
+
+    # Method 1: ipsw extract --dyld (iOS 16+ only; skip gracefully on older)
     log_info "Attempting: ipsw extract --dyld ..."
-    if ipsw extract --dyld --dyld-arch arm64e -o "${dyld_extract_dir}" "${ipsw_file}" 2>/dev/null; then
-        local extracted_cache
-        extracted_cache=$(find "${dyld_extract_dir}" -name "${DSC_BASENAME}" -type f 2>/dev/null | head -1)
-        if [ -n "${extracted_cache}" ]; then
-            log_success "Extracted dyld cache: ${extracted_cache}"
-            DYLD_CACHE_PATH="${extracted_cache}"
-            return 0
-        fi
+    local arch_flag="arm64e"
+    local major_ver
+    major_ver=$(echo "${IOS_VERSION}" | cut -d. -f1)
+    if [ "${major_ver}" -lt 14 ]; then
+        arch_flag="arm64"  # arm64e wasn't present before iOS 14
     fi
-    log_warn "ipsw extract --dyld failed, trying DMG mount method..."
+    if ipsw extract --dyld --dyld-arch "${arch_flag}" -o "${dyld_extract_dir}" "${ipsw_file}" 2>/dev/null; then
+        local extracted_cache
+        for candidate in "${dsc_candidates[@]}"; do
+            extracted_cache=$(find "${dyld_extract_dir}" -name "${candidate}" -not -name "*.dyldlinkedit" \
+                -not -name "*.dylddata" -not -name "*.symbols" -not -name "*.[0-9]*" \
+                -type f 2>/dev/null | head -1)
+            if [ -n "${extracted_cache}" ]; then
+                log_success "Extracted dyld cache (${candidate}): ${extracted_cache}"
+                DYLD_CACHE_PATH="${extracted_cache}"
+                RESOLVED_DSC_BASENAME="${candidate}"
+                return 0
+            fi
+        done
+    fi
+    log_warn "ipsw extract --dyld failed or no matching cache found; trying DMG mount method..."
 
-    # Method 2: Mount DMGs
-    local cache_locations=(
-        "System/Library/Caches/com.apple.dyld/${DSC_BASENAME}"
-        "System/Cryptexes/OS/System/Library/Caches/com.apple.dyld/${DSC_BASENAME}"
-        "System/Library/dyld/${DSC_BASENAME}"
-        "private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/${DSC_BASENAME}"
-    )
-
+    # Method 2: Mount DMGs and search for the cache at known paths.
+    # Build the list of locations to probe for every candidate basename.
     local dyld_cache_path=""
 
     for dmg_file in "${IPSW_EXTRACTION_DIR}"/*.dmg; do
@@ -834,21 +853,38 @@ find_dyld_shared_cache() {
             MOUNTED_VOLS+=("${mount_vol}")
             log_info "  Scanning volume: $(basename "${mount_vol}")"
 
-            for cache_location in "${cache_locations[@]}"; do
-                if [ -e "${mount_vol}/${cache_location}" ]; then
-                    dyld_cache_path="${mount_vol}/${cache_location}"
-                    log_success "Found at: ${dyld_cache_path}"
-                    DYLD_CACHE_PATH="${dyld_cache_path}"
-                    return 0
-                fi
+            for candidate in "${dsc_candidates[@]}"; do
+                local cache_locations=(
+                    "System/Library/Caches/com.apple.dyld/${candidate}"
+                    "System/Cryptexes/OS/System/Library/Caches/com.apple.dyld/${candidate}"
+                    "System/Library/dyld/${candidate}"
+                    "private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/${candidate}"
+                )
+                for cache_location in "${cache_locations[@]}"; do
+                    if [ -e "${mount_vol}/${cache_location}" ]; then
+                        dyld_cache_path="${mount_vol}/${cache_location}"
+                        log_success "Found ${candidate} at: ${dyld_cache_path}"
+                        DYLD_CACHE_PATH="${dyld_cache_path}"
+                        RESOLVED_DSC_BASENAME="${candidate}"
+                        return 0
+                    fi
+                done
             done
 
-            log_info "  Deep searching volume for ${DSC_BASENAME}..."
+            # Deep search: find any dyld_shared_cache_* primary file (no sub-file suffixes)
+            log_info "  Deep searching volume for dyld_shared_cache_*..."
             local deep_match
-            deep_match=$(find "${mount_vol}" -name "${DSC_BASENAME}" -type f 2>/dev/null | head -1)
+            deep_match=$(find "${mount_vol}" \
+                -name "dyld_shared_cache_arm*" \
+                -not -name "*.dyldlinkedit" \
+                -not -name "*.dylddata" \
+                -not -name "*.symbols" \
+                -not -name "*.[0-9]*" \
+                -type f 2>/dev/null | head -1)
             if [ -n "${deep_match}" ]; then
                 log_success "Found by deep search: ${deep_match}"
                 DYLD_CACHE_PATH="${deep_match}"
+                RESOLVED_DSC_BASENAME="$(basename "${deep_match}")"
                 return 0
             fi
 
@@ -856,8 +892,91 @@ find_dyld_shared_cache() {
         done
     done
 
-    log_error "Failed to find ${DSC_BASENAME} in IPSW"
+    log_error "Failed to find a dyld shared cache in IPSW (tried: ${dsc_candidates[*]})"
     exit 1
+}
+
+################################################################################
+# dsc_extractor_client Build Functions
+#
+# For iOS < 16, ipsw cannot extract the dyld shared cache directly.  The
+# reliable alternative (used by the official Theos workflow) is to compile a
+# tiny C shim that calls Apple's own dsc_extractor.bundle (bundled with the
+# Xcode platform) to extract every dylib from the cache into a symbols dir.
+# tbd then processes those extracted dylibs — a much more reliable path than
+# feeding the raw DSC file to tbd for older cache formats.
+################################################################################
+
+# Source for the dsc_extractor_client shim (verbatim from Apple's dyld repo,
+# identical to the copy in the official Theos sdks workflow).
+DSC_EXTRACTOR_CLIENT_SRC='
+// modified from Apple'\''s dyld
+// https://github.com/apple-oss-distributions/dyld/blob/18d3cb0/other-tools/dsc_extractor.cpp#L1080-L1111
+#include <dlfcn.h>
+#include <stddef.h>
+#include <stdio.h>
+typedef int (*extractor_proc)(const char *shared_cache_file_path,
+                               const char *extraction_root_path,
+                               void (^progress)(unsigned current, unsigned total));
+int main(int argc, const char *argv[]) {
+    if (argc != 4) {
+        fprintf(stderr, "usage: %s <path-to-dsc_extractor-bundle> <path-to-cache-file> <path-to-device-dir>\n", argv[0]);
+        return 1;
+    }
+    void *const handle = dlopen(argv[1], RTLD_LAZY);
+    if (handle == NULL) {
+        fprintf(stderr, "dsc_extractor.bundle could not be loaded\n");
+        return 1;
+    }
+    extractor_proc const proc = (extractor_proc)dlsym(handle, "dyld_shared_cache_extract_dylibs_progress");
+    if (proc == NULL) {
+        fprintf(stderr, "%s did not have dyld_shared_cache_extract_dylibs_progress symbol\n", argv[1]);
+        return 1;
+    }
+    int result = proc(argv[2], argv[3], ^(unsigned current, unsigned total) {
+        unsigned const c = current + 1;
+        printf("  %u/%u%c", c, total, (c == total) ? '\''\n'\'' : '\''\r'\'');
+        fflush(stdout);
+    });
+    dlclose(handle);
+    return result;
+}
+'
+
+build_dsc_extractor_client() {
+    log_step "Step 7a: Building dsc_extractor_client"
+
+    # Shared binary location across all versions (only compiled once per run)
+    local client_dir="${SCRIPT_DIR}/.dsc_extractor_client"
+    local client_bin="${client_dir}/dsc_extractor_client"
+
+    if [ -f "${client_bin}" ]; then
+        log_success "dsc_extractor_client already built"
+        DSC_EXTRACTOR_CLIENT_PATH="${client_bin}"
+        return 0
+    fi
+
+    mkdir -p "${client_dir}"
+    local src_file="${client_dir}/dsc_extractor_client.c"
+
+    printf '%s' "${DSC_EXTRACTOR_CLIENT_SRC}" > "${src_file}"
+
+    log_info "Compiling dsc_extractor_client..."
+    # Use the active Xcode's clang. DEVELOPER_DIR must point to Contents/Developer
+    # (not the .app root) for xcrun to work; export_DEVELOPER_DIR is set by
+    # download_and_extract_xcode to the .app path, so we resolve it explicitly.
+    local dev_dir
+    dev_dir=$(xcode-select -p 2>/dev/null || true)
+    [ -z "${dev_dir}" ] && dev_dir="${DEVELOPER_DIR:-}/Contents/Developer"
+    local clang_bin
+    clang_bin=$(DEVELOPER_DIR="${dev_dir}" xcrun --find clang 2>/dev/null || echo "clang")
+    if "${clang_bin}" -o "${client_bin}" "${src_file}" 2>/dev/null; then
+        log_success "dsc_extractor_client compiled: ${client_bin}"
+        DSC_EXTRACTOR_CLIENT_PATH="${client_bin}"
+    else
+        log_warn "Failed to compile dsc_extractor_client — will fall back to tbd direct mode"
+        DSC_EXTRACTOR_CLIENT_PATH=""
+    fi
 }
 
 ################################################################################
@@ -948,30 +1067,44 @@ create_patched_sdk() {
 
     log_info "Getting SDK paths from Xcode..."
 
-    # ── Ensure xcrun uses the correct Xcode for this iOS version ──────────────
-    # xcrun normally respects $DEVELOPER_DIR, but on GitHub-hosted runners the
-    # system xcode-select default may point to a different Xcode installation
-    # (or to the Xcode command-line tools which have no iphoneos SDK at all).
-    # Calling xcode-select explicitly is the most reliable way to guarantee the
-    # right Xcode is active for the duration of this function.
+    # ── Resolve the active Xcode developer directory (three-step fallback) ────
+    # Step 1: expected versioned path (the happy path on GitHub runners)
     local xcode_dev_dir="/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
-    if [ -d "${xcode_dev_dir}" ]; then
-        log_info "Setting active developer directory → ${xcode_dev_dir}"
-        sudo xcode-select -s "${xcode_dev_dir}" 2>/dev/null || true
-    else
-        log_warn "Xcode developer directory not found at ${xcode_dev_dir} — xcrun may fail"
+
+    if [ ! -d "${xcode_dev_dir}" ]; then
+        log_warn "Xcode not found at ${xcode_dev_dir} — trying xcode-select -p..."
+
+        # Step 2: ask the system which Xcode is currently active
+        local selected_dev_dir
+        selected_dev_dir=$(xcode-select -p 2>/dev/null || true)
+        if [ -d "${selected_dev_dir}" ]; then
+            log_info "xcode-select -p → ${selected_dev_dir}"
+            xcode_dev_dir="${selected_dev_dir}"
+        else
+            log_warn "xcode-select -p returned nothing — scanning /Applications..."
+
+            # Step 3: take the highest-versioned Xcode*.app in /Applications
+            local scanned_app
+            scanned_app=$(find /Applications -maxdepth 1 -name "Xcode*.app" -type d 2>/dev/null \
+                          | sort -V | tail -1)
+            if [ -n "${scanned_app}" ] && [ -d "${scanned_app}/Contents/Developer" ]; then
+                xcode_dev_dir="${scanned_app}/Contents/Developer"
+                log_info "Found via scan: ${xcode_dev_dir}"
+            else
+                log_error "Could not locate any Xcode installation. Installed apps:"
+                find /Applications -maxdepth 1 -name "Xcode*.app" 2>/dev/null | sed 's/^/    /' || true
+                exit 1
+            fi
+        fi
     fi
 
+    log_info "Setting active developer directory → ${xcode_dev_dir}"
+    sudo xcode-select -s "${xcode_dev_dir}" 2>/dev/null || true
+
     local base_sdk_path
-    # Pass DEVELOPER_DIR inline as well; belt-and-suspenders against any
-    # environment that re-exports DEVELOPER_DIR to the .app path rather than
-    # the Contents/Developer path that xcrun expects.
     base_sdk_path=$(DEVELOPER_DIR="${xcode_dev_dir}" xcrun --sdk "${XCRUN_SDK_NAME}" --show-sdk-path 2>/dev/null)
 
-    # ── Filesystem fallback ───────────────────────────────────────────────────
-    # If xcrun still returns empty (e.g. the Xcode installation is partially
-    # broken or the SDK sub-directory naming differs), scan the SDKs folder
-    # directly and pick the highest-versioned iPhoneOS SDK present.
+    # Filesystem fallback
     if [ -z "${base_sdk_path}" ]; then
         log_warn "xcrun returned no SDK path — scanning Xcode installation directly..."
         local sdks_dir="${xcode_dev_dir}/Platforms/iPhoneOS.platform/Developer/SDKs"
@@ -991,26 +1124,80 @@ create_patched_sdk() {
         exit 1
     fi
 
-    # ── Isolate the primary dyld cache into a clean single-file directory ──────
-    # tbd processes every file in the given directory.  The extraction
-    # directory from ipsw contains 60+ split sub-cache files which tbd cannot
-    # parse (they are not standalone caches).  Give tbd only the primary file.
-    local tbd_input_dir="${WORK_DIR}/dyld_for_tbd"
-    mkdir -p "${tbd_input_dir}"
-    # Prefer a hard-link (instant, no extra disk) and fall back to a copy.
-    ln "${DYLD_CACHE_PATH}" "${tbd_input_dir}/${DSC_BASENAME}" 2>/dev/null \
-        || cp "${DYLD_CACHE_PATH}" "${tbd_input_dir}/${DSC_BASENAME}"
-    log_info "Isolated primary dyld cache → ${tbd_input_dir}/${DSC_BASENAME}"
+    # ── Platform path (needed for dsc_extractor.bundle) ───────────────────────
+    PLATFORM_PATH=$(DEVELOPER_DIR="${xcode_dev_dir}" xcrun --sdk "${XCRUN_SDK_NAME}" --show-sdk-platform-path 2>/dev/null || true)
+    if [ -z "${PLATFORM_PATH}" ]; then
+        PLATFORM_PATH="${xcode_dev_dir}/Platforms/iPhoneOS.platform"
+        log_warn "xcrun did not return platform path; assuming ${PLATFORM_PATH}"
+    fi
+
+    # ── Choose the actual DSC basename that was found ─────────────────────────
+    local active_dsc_basename="${RESOLVED_DSC_BASENAME:-${DSC_BASENAME}}"
+
+    # ── Strategy: prefer dsc_extractor_client (extracts full dylib tree) ──────
+    # The extractor approach is more reliable for older cache formats (pre-iOS 16).
+    # For modern split caches (iOS 15+) tbd handles them natively via direct mode.
+    local symbols_input_dir=""
+
+    local dsc_bundle="${PLATFORM_PATH}/usr/lib/dsc_extractor.bundle"
+
+    local major_ver
+    major_ver=$(echo "${IOS_VERSION}" | cut -d. -f1)
+
+    if [ -n "${DSC_EXTRACTOR_CLIENT_PATH}" ] && [ -f "${dsc_bundle}" ]; then
+        log_info "Using dsc_extractor_client approach (reliable for all iOS versions)"
+        log_info "  Bundle:   ${dsc_bundle}"
+        log_info "  Cache:    ${DYLD_CACHE_PATH}"
+
+        local extracted_dir="${WORK_DIR}/dyld_symbols"
+        mkdir -p "${extracted_dir}"
+
+        if "${DSC_EXTRACTOR_CLIENT_PATH}" \
+                "${dsc_bundle}" \
+                "${DYLD_CACHE_PATH}" \
+                "${extracted_dir}" 2>&1 | tail -5; then
+            local dylib_count
+            dylib_count=$(find "${extracted_dir}" -name "*.dylib" 2>/dev/null | wc -l | tr -d ' ')
+            if [ "${dylib_count}" -gt 0 ]; then
+                log_success "dsc_extractor extracted ${dylib_count} dylibs → ${extracted_dir}"
+                symbols_input_dir="${extracted_dir}"
+            else
+                log_warn "dsc_extractor produced no dylibs; falling back to direct DSC mode"
+            fi
+        else
+            log_warn "dsc_extractor_client failed; falling back to direct DSC mode"
+        fi
+    else
+        if [ -z "${DSC_EXTRACTOR_CLIENT_PATH}" ]; then
+            log_warn "dsc_extractor_client not available"
+        fi
+        if [ ! -f "${dsc_bundle}" ]; then
+            log_warn "dsc_extractor.bundle not found at: ${dsc_bundle}"
+        fi
+    fi
+
+    # ── Fallback: isolate primary cache file and let tbd parse it directly ────
+    # We put only the primary cache (no sub-files) in a dedicated directory so
+    # tbd does not choke on the dozens of split sub-cache files.
+    if [ -z "${symbols_input_dir}" ]; then
+        log_info "Using direct DSC mode (tbd parses cache directly)"
+        local tbd_input_dir="${WORK_DIR}/dyld_for_tbd"
+        mkdir -p "${tbd_input_dir}"
+        ln "${DYLD_CACHE_PATH}" "${tbd_input_dir}/${active_dsc_basename}" 2>/dev/null \
+            || cp "${DYLD_CACHE_PATH}" "${tbd_input_dir}/${active_dsc_basename}"
+        log_info "Isolated primary dyld cache → ${tbd_input_dir}/${active_dsc_basename}"
+        symbols_input_dir="${tbd_input_dir}"
+    fi
 
     log_info "Base SDK path:  ${base_sdk_path}"
-    log_info "dyld cache:     ${DYLD_CACHE_PATH}"
+    log_info "Symbols input:  ${symbols_input_dir}"
     log_info "tbd tool:       ${TBD_TOOL_PATH}"
     log_info "Output SDK:     ${SDK_OUTPUT_PATH}"
 
     log_info "Running SDK patching script (this may take several minutes)..."
 
     "${patch_script}" \
-        "${tbd_input_dir}" \
+        "${symbols_input_dir}" \
         "${SDK_OUTPUT_PATH}" \
         "${base_sdk_path}" \
         "${TBD_TOOL_PATH}" || true
@@ -1020,7 +1207,6 @@ create_patched_sdk() {
         exit 1
     fi
 
-    # Verify the SDK actually contains .tbd stubs (not just copied headers).
     local tbd_count
     tbd_count=$(find "${SDK_OUTPUT_PATH}" -name "*.tbd" 2>/dev/null | wc -l | tr -d ' ')
     if [ "${tbd_count}" -eq 0 ]; then
@@ -1138,6 +1324,7 @@ process_version() {
     select_device_automatically
     download_and_extract_ipsw
     find_dyld_shared_cache
+    build_dsc_extractor_client
     build_tbd_tool
     create_patched_sdk
     finalize_sdk
@@ -1357,6 +1544,7 @@ main() {
     select_device_automatically
     download_and_extract_ipsw
     find_dyld_shared_cache
+    build_dsc_extractor_client
     build_tbd_tool
     create_patched_sdk
     finalize_sdk
