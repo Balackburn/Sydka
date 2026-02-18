@@ -763,29 +763,39 @@ find_dyld_shared_cache() {
     # armv7s / armv7 (iOS 9–10).  We try all so older devices are handled.
     local dsc_candidates=("dyld_shared_cache_arm64e" "dyld_shared_cache_arm64" "dyld_shared_cache_armv7s" "dyld_shared_cache_armv7")
 
-    # Method 1: ipsw extract --dyld (iOS 16+ only; skip gracefully on older)
-    log_info "Attempting: ipsw extract --dyld ..."
-    local arch_flag="arm64e"
-    local major_ver
-    major_ver=$(echo "${IOS_VERSION}" | cut -d. -f1)
-    if [ "${major_ver}" -lt 14 ]; then
-        arch_flag="arm64"  # arm64e wasn't present before iOS 14
-    fi
-    if ipsw extract --dyld --dyld-arch "${arch_flag}" -o "${dyld_extract_dir}" "${ipsw_file}" 2>/dev/null; then
-        local extracted_cache
-        for candidate in "${dsc_candidates[@]}"; do
-            extracted_cache=$(find "${dyld_extract_dir}" -name "${candidate}" -not -name "*.dyldlinkedit" \
-                -not -name "*.dylddata" -not -name "*.symbols" -not -name "*.[0-9]*" \
-                -type f 2>/dev/null | head -1)
-            if [ -n "${extracted_cache}" ]; then
-                log_success "Extracted dyld cache (${candidate}): ${extracted_cache}"
-                DYLD_CACHE_PATH="${extracted_cache}"
-                RESOLVED_DSC_BASENAME="${candidate}"
-                return 0
-            fi
-        done
-    fi
-    log_warn "ipsw extract --dyld failed or no matching cache found; trying DMG mount method..."
+    # Corresponding arch flags for ipsw extract --dyld
+    # ipsw has a built-in firmware key database and is the ONLY reliable method
+    # for old IPSWs (iOS 9–12) whose root filesystems are encrypted img3/img4
+    # images that hdiutil cannot mount.  Try every arch — ipsw will skip ones
+    # that don't exist in the IPSW and return non-zero.
+    local arch_candidates=("arm64e" "arm64" "armv7s" "armv7")
+
+    # Method 1: ipsw extract --dyld — try each arch until one succeeds
+    log_info "Attempting ipsw extract --dyld (tries all arch variants)..."
+    local arch
+    for arch in "${arch_candidates[@]}"; do
+        log_info "  Trying --dyld-arch ${arch}..."
+        if ipsw extract --dyld --dyld-arch "${arch}" -o "${dyld_extract_dir}" "${ipsw_file}" 2>/dev/null; then
+            local extracted_cache
+            for candidate in "${dsc_candidates[@]}"; do
+                extracted_cache=$(find "${dyld_extract_dir}" \
+                    -name "${candidate}" \
+                    -not -name "*.dyldlinkedit" \
+                    -not -name "*.dylddata" \
+                    -not -name "*.symbols" \
+                    -not -name "*.[0-9]*" \
+                    -type f 2>/dev/null | head -1)
+                if [ -n "${extracted_cache}" ]; then
+                    log_success "Extracted dyld cache (${candidate}, arch=${arch}): ${extracted_cache}"
+                    DYLD_CACHE_PATH="${extracted_cache}"
+                    RESOLVED_DSC_BASENAME="${candidate}"
+                    return 0
+                fi
+            done
+        fi
+    done
+    log_warn "ipsw extract --dyld: no cache found for any arch — trying DMG mount method..."
+    log_warn "(Note: encrypted iOS 9–12 images may not be mountable without firmware keys)"
 
     # Method 2: Mount DMGs and search for the cache at known paths.
     # Build the list of locations to probe for every candidate basename.
