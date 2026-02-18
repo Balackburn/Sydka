@@ -456,13 +456,50 @@ download_and_extract_xcode() {
         return 0
     fi
 
-    # ── 2. Download via xcodes (uses aria2 automatically when installed) ──────
+    # ── 2. Resolve exact xcodes version string ────────────────────────────────
+    # xcodes stores versions with qualifiers: "11.5 GM", "14.3 Release Candidate"
+    # etc. Passing just "11.5" returns "Could not find version". Query the list
+    # first and pick the best match: prefer GM/Release Candidate over Beta,
+    # and exact number match over partial.
+    log_info "Resolving exact xcodes version string for ${XCODE_VERSION}..."
+
+    local xcodes_version_str
+    xcodes_version_str=$(xcodes list 2>/dev/null \
+        | grep -E "^[[:space:]]*${XCODE_VERSION}([[:space:](]|$)" \
+        | grep -v 'Beta\|Seed' \
+        | tail -1 \
+        | sed 's/ ([^)]*)$//' \
+        | sed 's/^[[:space:]]*//' \
+        | sed 's/[[:space:]]*$//' \
+        || true)
+
+    # If no non-beta match found, fall back to any match (handles cases where
+    # only a beta was ever released for that version number)
+    if [ -z "${xcodes_version_str}" ]; then
+        xcodes_version_str=$(xcodes list 2>/dev/null \
+            | grep -E "^[[:space:]]*${XCODE_VERSION}([[:space:](]|$)" \
+            | tail -1 \
+            | sed 's/ ([^)]*)$//' \
+            | sed 's/^[[:space:]]*//' \
+            | sed 's/[[:space:]]*$//' \
+            || true)
+    fi
+
+    if [ -z "${xcodes_version_str}" ]; then
+        log_error "Could not find Xcode ${XCODE_VERSION} in xcodes list"
+        log_info  "Run 'xcodes list' to see all available versions"
+        return 1
+    fi
+
+    log_info "Resolved: '${xcodes_version_str}'"
+
+    # ── 3. Download via xcodes (uses aria2 automatically when installed) ──────
     # xcodes detects aria2 in PATH and uses it with up to 16 connections,
     # which is 3-5x faster and avoids single-stream timeout issues entirely.
-    log_info "Downloading Xcode ${XCODE_VERSION} via xcodes + aria2..."
+    log_info "Downloading via xcodes + aria2..."
 
     set +e
-    xcodes download --use-fastlane-auth "${XCODE_VERSION}"
+    xcodes download --use-fastlane-auth "${xcodes_version_str}"
     local xcodes_exit=$?
     set -e
 
