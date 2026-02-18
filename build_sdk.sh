@@ -947,11 +947,47 @@ create_patched_sdk() {
     fi
 
     log_info "Getting SDK paths from Xcode..."
+
+    # ── Ensure xcrun uses the correct Xcode for this iOS version ──────────────
+    # xcrun normally respects $DEVELOPER_DIR, but on GitHub-hosted runners the
+    # system xcode-select default may point to a different Xcode installation
+    # (or to the Xcode command-line tools which have no iphoneos SDK at all).
+    # Calling xcode-select explicitly is the most reliable way to guarantee the
+    # right Xcode is active for the duration of this function.
+    local xcode_dev_dir="/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+    if [ -d "${xcode_dev_dir}" ]; then
+        log_info "Setting active developer directory → ${xcode_dev_dir}"
+        sudo xcode-select -s "${xcode_dev_dir}" 2>/dev/null || true
+    else
+        log_warn "Xcode developer directory not found at ${xcode_dev_dir} — xcrun may fail"
+    fi
+
     local base_sdk_path
-    base_sdk_path=$(xcrun --sdk "${XCRUN_SDK_NAME}" --show-sdk-path 2>/dev/null)
+    # Pass DEVELOPER_DIR inline as well; belt-and-suspenders against any
+    # environment that re-exports DEVELOPER_DIR to the .app path rather than
+    # the Contents/Developer path that xcrun expects.
+    base_sdk_path=$(DEVELOPER_DIR="${xcode_dev_dir}" xcrun --sdk "${XCRUN_SDK_NAME}" --show-sdk-path 2>/dev/null)
+
+    # ── Filesystem fallback ───────────────────────────────────────────────────
+    # If xcrun still returns empty (e.g. the Xcode installation is partially
+    # broken or the SDK sub-directory naming differs), scan the SDKs folder
+    # directly and pick the highest-versioned iPhoneOS SDK present.
+    if [ -z "${base_sdk_path}" ]; then
+        log_warn "xcrun returned no SDK path — scanning Xcode installation directly..."
+        local sdks_dir="${xcode_dev_dir}/Platforms/iPhoneOS.platform/Developer/SDKs"
+        if [ -d "${sdks_dir}" ]; then
+            base_sdk_path=$(find "${sdks_dir}" -maxdepth 1 -name "iPhoneOS*.sdk" -type d 2>/dev/null \
+                            | sort -V | tail -1)
+            if [ -n "${base_sdk_path}" ]; then
+                log_info "Found SDK via filesystem scan: ${base_sdk_path}"
+            fi
+        fi
+    fi
 
     if [ -z "${base_sdk_path}" ]; then
-        log_error "Failed to get base SDK path from Xcode"
+        log_error "Failed to locate base SDK for Xcode ${XCODE_VERSION}"
+        log_info  "Searched: xcrun --sdk ${XCRUN_SDK_NAME} --show-sdk-path"
+        log_info  "Searched: ${xcode_dev_dir}/Platforms/iPhoneOS.platform/Developer/SDKs/"
         exit 1
     fi
 
