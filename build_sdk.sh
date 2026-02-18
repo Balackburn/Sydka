@@ -14,7 +14,6 @@
 # Usage: ./create_sdk.sh [OPTIONS]
 ################################################################################
 
-set -euo pipefail
 
 ################################################################################
 # Configuration & Global Variables
@@ -1061,7 +1060,7 @@ create_patched_sdk() {
     sudo xcode-select -s "${xcode_dev_dir}" 2>/dev/null || true
 
     local base_sdk_path
-    base_sdk_path=$(DEVELOPER_DIR="${xcode_dev_dir}" xcrun --sdk "${XCRUN_SDK_NAME}" --show-sdk-path 2>/dev/null)
+    base_sdk_path=$(DEVELOPER_DIR="${xcode_dev_dir}" xcrun --sdk "${XCRUN_SDK_NAME}" --show-sdk-path 2>/dev/null) || true
 
     # Filesystem fallback
     if [ -z "${base_sdk_path}" ]; then
@@ -1069,7 +1068,7 @@ create_patched_sdk() {
         local sdks_dir="${xcode_dev_dir}/Platforms/iPhoneOS.platform/Developer/SDKs"
         if [ -d "${sdks_dir}" ]; then
             base_sdk_path=$(find "${sdks_dir}" -maxdepth 1 -name "iPhoneOS*.sdk" -type d 2>/dev/null \
-                            | sort -V | tail -1)
+                            | sort -V | tail -1) || true
             if [ -n "${base_sdk_path}" ]; then
                 log_info "Found SDK via filesystem scan: ${base_sdk_path}"
             fi
@@ -1084,7 +1083,7 @@ create_patched_sdk() {
     fi
 
     # ── Platform path (needed for dsc_extractor.bundle) ───────────────────────
-    PLATFORM_PATH=$(DEVELOPER_DIR="${xcode_dev_dir}" xcrun --sdk "${XCRUN_SDK_NAME}" --show-sdk-platform-path 2>/dev/null || true)
+    PLATFORM_PATH=$(DEVELOPER_DIR="${xcode_dev_dir}" xcrun --sdk "${XCRUN_SDK_NAME}" --show-sdk-platform-path 2>/dev/null) || true
     if [ -z "${PLATFORM_PATH}" ]; then
         PLATFORM_PATH="${xcode_dev_dir}/Platforms/iPhoneOS.platform"
         log_warn "xcrun did not return platform path; assuming ${PLATFORM_PATH}"
