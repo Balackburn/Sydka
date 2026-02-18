@@ -36,7 +36,7 @@ tar -xJf iPhoneOS18.2.sdk.tar.xz -C $THEOS/sdks/
 
 ## Secrets (required for Xcode download)
 
-Sydka authenticates with Apple via Fastlane `spaceauth`. Sessions last ~30 days.
+Sydka authenticates with Apple via Fastlane `spaceauth`. Sessions last between 1~30 days.
 
 ```bash
 # Install Fastlane, then:
