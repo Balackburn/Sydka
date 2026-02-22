@@ -1,27 +1,37 @@
 <div align="center">
 
-<br>
-
-```
+<!-- Logo -->
+<pre>
  ███████╗██╗   ██╗██████╗ ██╗  ██╗ █████╗
  ██╔════╝╚██╗ ██╔╝██╔══██╗██║ ██╔╝██╔══██╗
  ███████╗ ╚████╔╝ ██║  ██║█████╔╝ ███████║
  ╚════██║  ╚██╔╝  ██║  ██║██╔═██╗ ██╔══██║
  ███████║   ██║   ██████╔╝██║  ██╗██║  ██║
  ╚══════╝   ╚═╝   ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝
-```
+</pre>
 
-**Automated patched iOS SDKs — ready for [Theos](https://theos.dev) tweak development.**
+### Automated Patched iOS SDKs  
+**Ready for seamless Theos tweak development**
 
 <br>
 
-[![iOS](https://img.shields.io/badge/iOS-9.3_→_26.x-0A84FF?style=flat-square&logo=apple&logoColor=white)](https://github.com)
-[![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=flat-square&logo=github-actions&logoColor=white)](https://github.com)
-[![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](LICENSE)
+<a href="https://theos.dev">
+  <img src="https://img.shields.io/badge/Built%20for-Theos-0A84FF?style=for-the-badge&logo=apple&logoColor=white" />
+</a>
+<a href="#">
+  <img src="https://img.shields.io/badge/iOS-9.3%20→%2026.x-111827?style=for-the-badge&logo=apple&logoColor=white" />
+</a>
+<a href="#">
+  <img src="https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?style=for-the-badge&logo=github-actions&logoColor=white" />
+</a>
+<a href="LICENSE">
+  <img src="https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge" />
+</a>
+
+<br><br>
+
 
 </div>
-
-<br>
 
 ---
 
